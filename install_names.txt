@@ -1,0 +1,15 @@
+libasset
+asset
+bugfix
+patch
+driver
+kernel-addon
+texturepack
+fontpack
+localedata
+compat-layer
+docbundle
+ui-skin
+shader
+rescache
+langpack
