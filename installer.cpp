@@ -9,6 +9,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <sys/select.h>
@@ -41,6 +42,34 @@ bool escPressed() {
 }
 
 }  // namespace
+
+void drawProgress(const std::string &label, int percent);
+
+class ProgressBar {
+ public:
+  ProgressBar(int minStep, int maxStep, int delayMs)
+      : minStep_(std::max(1, minStep)),
+        maxStep_(std::max(minStep_, maxStep)),
+        delayMs_(std::max(5, delayMs)) {}
+
+  bool run(const std::string &label, std::mt19937 &rng) const {
+    std::uniform_int_distribution<int> step(minStep_, maxStep_);
+    int percent = 0;
+    while (percent < 100) {
+      percent = std::min(100, percent + step(rng));
+      drawProgress(label, percent);
+      if (escPressed()) return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(delayMs_));
+    }
+    std::cout << "\n";
+    return true;
+  }
+
+ private:
+  int minStep_;
+  int maxStep_;
+  int delayMs_;
+};
 
 bool promptRootLogin(const std::string &user) {
   std::cout << ansi::blue << "[sudo] password for " << user << ": "
@@ -75,19 +104,6 @@ void drawProgress(const std::string &label, int percent) {
     std::cout << (i < filled ? "#" : ".");
   }
   std::cout << "] " << percent << "%   " << std::flush;
-}
-
-bool runProgressBar(const std::string &label, std::mt19937 &rng) {
-  std::uniform_int_distribution<int> step(4, 12);
-  int percent = 0;
-  while (percent < 100) {
-    percent = std::min(100, percent + step(rng));
-    drawProgress(label, percent);
-    if (escPressed()) return false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(90));
-  }
-  std::cout << "\n";
-  return true;
 }
 
 bool runSpinner(const std::string &label, int cycles, std::mt19937 &rng) {
@@ -210,35 +226,179 @@ std::string pickInstallPath(const std::vector<std::string> &realPaths,
   return fabricatePath(user, tokens, rng);
 }
 
-bool runFakeInstaller(std::mt19937 &rng, const std::string &user) {
-  const std::vector<std::string> packages = {
-      "build-essential", "libssl-dev",     "curl",        "neofetch",
-      "lolcat",          "cowsay",         "fortune-mod", "htop",
-      "tmux",            "figlet",         "openssl-dev", "git",
-      "zlib1g-dev",      "sqlite3",        "mesa-utils",  "nmap",
-      "wireguard-tools"};
-  std::vector<std::string> items =
-      loadInstallNames("install_names.txt");  // temp, expand this later
-  if (items.empty()) {
-    items = {"libasset", "patch", "bugfix", "resync", "texture", "fontpack",
-             "locale", "driver", "gamedata", "ui-skin"};
+class NameBuilder {
+ public:
+  NameBuilder(const std::vector<std::string> &tokens, std::mt19937 &rng)
+      : tokens_(tokens), rng_(rng) {}
+
+  std::string randomToken() {
+    if (tokens_.empty()) return "pkg";
+    std::uniform_int_distribution<int> idx(
+        0, static_cast<int>(tokens_.size()) - 1);
+    return tokens_[static_cast<size_t>(idx(rng_))];
   }
+
+  std::string randomVersion() {
+    std::uniform_int_distribution<int> v(0, 19);
+    return std::to_string(v(rng_)) + "." + std::to_string(v(rng_)) + "." +
+           std::to_string(v(rng_));
+  }
+
+  std::string build() {
+    std::uniform_int_distribution<int> pattern(0, 4);
+    switch (pattern(rng_)) {
+      case 0:
+        return randomToken() + "-" + randomToken();
+      case 1:
+        return randomToken() + randomToken() + "-" + randomVersion();
+      case 2:
+        return randomToken() + ":" + randomToken() + "@" + randomVersion();
+      case 3:
+        return randomToken() + "." + randomToken() + "." + randomVersion();
+      case 4:
+      default:
+        return randomToken() + "-" + randomToken() + "-" + randomToken();
+    }
+  }
+
+ private:
+  const std::vector<std::string> &tokens_;
+  std::mt19937 &rng_;
+};
+
+struct DependencyList {
+  std::vector<std::string> names;
+  std::vector<double> sizesMb;
+};
+
+bool promptDependencies(const std::string &pkg, std::mt19937 &rng,
+                        DependencyList &out) {
+  static const std::vector<std::string> deps = {
+      "libcrypto",   "libuv",      "libhttp3",   "libvector",
+      "libneon",     "libsol",     "libzstd",    "libinput",
+      "libfreetype", "libcairo",   "libpulse",   "libsystemd",
+      "libfirefly",  "libmesh",    "libqt6core", "libqt6gui",
+      "libxrender",  "libx264",    "libwayland", "libssl",
+      "libcurl",     "libarch",    "libpipeline"};
+
+  std::uniform_int_distribution<int> countDist(4, 9);
+  std::uniform_int_distribution<int> ver(0, 9);
+  std::uniform_real_distribution<double> sizeMb(0.5, 45.0);
+  const int count = countDist(rng);
+
+  out.names.clear();
+  out.sizesMb.clear();
+
+  std::cout << ansi::yellow << "[deps] Additional requirements for " << pkg
+            << ":" << ansi::reset << "\n";
+  for (int i = 0; i < count; ++i) {
+    const std::string &name = deps[static_cast<size_t>(rng() % deps.size())];
+    const double sz = sizeMb(rng);
+    out.names.push_back(name + " >= " + std::to_string(ver(rng)) + "." +
+                        std::to_string(ver(rng)) + "." +
+                        std::to_string(ver(rng)));
+    out.sizesMb.push_back(sz);
+    std::cout << "  - " << out.names.back() << " (" << std::fixed
+              << std::setprecision(1) << sz << " MB)\n";
+  }
+
+  std::cout << ansi::blue << "Continue installing " << pkg << "? [y/N]: "
+            << ansi::reset << std::flush;
+
+  std::string response;
+  while (true) {
+    char c;
+    const ssize_t n = read(STDIN_FILENO, &c, 1);
+    if (n <= 0) continue;
+    if (c == 27) {
+      std::cout << "\n";
+      return false;
+    }
+    if (c == '\n' || c == '\r') {
+      std::cout << "\n";
+      break;
+    }
+    response.push_back(c);
+    std::cout << c << std::flush;
+  }
+
+  if (!response.empty() && (response[0] == 'y' || response[0] == 'Y')) {
+    std::cout << ansi::green << "Proceeding." << ansi::reset << "\n";
+    return true;
+  }
+  std::cout << ansi::yellow << "Cancelled by user." << ansi::reset << "\n";
+  return false;
+}
+
+bool installDependencies(const DependencyList &deps, std::mt19937 &rng,
+                         const std::string &user,
+                         const std::vector<std::string> &tokens) {
+  std::uniform_int_distribution<int> stepMin(3, 5);
+  std::uniform_int_distribution<int> stepMax(7, 11);
+  std::uniform_int_distribution<int> delay(50, 110);
+  for (size_t i = 0; i < deps.names.size(); ++i) {
+    const std::string path = fabricatePath(user, tokens, rng);
+    const std::string label = "Installing " + deps.names[i];
+    ProgressBar bar(stepMin(rng), stepMax(rng), delay(rng));
+    if (!bar.run(label, rng)) return false;
+    if (!dotInstall(deps.names[i], path, rng)) return false;
+  }
+  return true;
+}
+
+bool runFakeInstaller(std::mt19937 &rng, const std::string &user) {
+  std::vector<std::string> items = loadInstallNames("install_names.txt");
+  if (items.empty()) {
+    items = {"libasset",      "patch",     "bugfix",  "resync",   "texture",
+             "fontpack",      "locale",    "driver",  "gamedata", "ui-skin",
+             "microcode",     "capsule",   "nanomod", "overdrive","delta-sync",
+             "quasar",        "plasma",    "tracer",  "beacon",   "sentinel",
+             "flux",          "atlas",     "nebula",  "cascade",  "eclipse",
+             "solstice",      "glimmer",   "spectre", "ember",    "frost",
+             "tidal",         "obsidian",  "onyx",    "opal",     "citrine",
+             "zircon",        "aurora",    "quanta",  "warden"};
+  }
+
+  NameBuilder nameGen(items, rng);
+  std::unordered_set<std::string> seen;
+  std::vector<std::string> packages;
+  while (packages.size() < 16) {
+    const std::string next = nameGen.build();
+    if (seen.insert(next).second) packages.push_back(next);
+  }
+
   std::vector<std::string> realPaths = collectRealPaths(user);
   const std::vector<int> actions = {0, 0, 1, 1, 1, 2, 2, 2,
                                     3};  // more installs, fewer noise
   std::uniform_int_distribution<int> actionDist(
       0, static_cast<int>(actions.size()) - 1);
-  std::uniform_int_distribution<int> itemDist(
-      0, static_cast<int>(items.size()) - 1);
+  std::uniform_int_distribution<int> depsChance(0, 99);
+  std::uniform_int_distribution<int> progressDelay(55, 130);
+  std::uniform_int_distribution<int> stepMin(3, 6);
+  std::uniform_int_distribution<int> stepMax(8, 13);
 
   for (const auto &pkg : packages) {
     std::cout << ansi::magenta << "[*] Preparing " << pkg << ansi::reset
               << "\n";
 
+    DependencyList depList;
+    const bool hasDeps = depsChance(rng) < 25;
+    if (hasDeps) {
+      if (!promptDependencies(pkg, rng, depList)) {
+        std::cout << ansi::yellow << "Aborted by user." << ansi::reset << "\n";
+        return false;
+      }
+      if (!installDependencies(depList, rng, user, items)) {
+        std::cout << ansi::yellow << "Aborted by user." << ansi::reset << "\n";
+        return false;
+      }
+    }
+
     bool ok = true;
     switch (actions[static_cast<size_t>(actionDist(rng))]) {
       case 0:
-        ok = runProgressBar("Downloading " + pkg, rng);
+        ok = ProgressBar(stepMin(rng), stepMax(rng), progressDelay(rng))
+                 .run("Downloading " + pkg, rng);
         break;
       case 1: {
         std::uniform_int_distribution<int> cyclesDist(12, 42);
@@ -246,11 +406,7 @@ bool runFakeInstaller(std::mt19937 &rng, const std::string &user) {
         break;
       }
       case 2: {
-        const std::string item =
-            items[static_cast<size_t>(itemDist(rng))] + "0" +
-            std::to_string(itemDist(rng)) + "." +
-            std::to_string(20 + (rng() % 70)) + "." +
-            std::to_string(1 + (rng() % 20));
+        const std::string item = nameGen.build();
         const std::string path = pickInstallPath(realPaths, user, items, rng);
         ok = dotInstall(item, path, rng);
         break;
