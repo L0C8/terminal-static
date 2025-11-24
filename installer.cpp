@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -145,18 +146,21 @@ bool noiseBurst(const std::string &pkg, std::mt19937 &rng) {
 bool dotInstall(const std::string &item, const std::string &path,
                 std::mt19937 &rng) {
   std::uniform_real_distribution<double> sizeDist(4.0, 120.0);
-  std::uniform_int_distribution<int> dotCount(6, 14);
   const double sizeMb = sizeDist(rng);
-  std::cout << "Installing " << item << " (" << std::fixed
-            << std::setprecision(1) << sizeMb << " MB) -> " << path << " ... "
-            << std::flush;
-  const int dots = dotCount(rng);
-  for (int i = 0; i < dots; ++i) {
+  std::ostringstream sizeBuf;
+  sizeBuf << std::fixed << std::setprecision(1) << sizeMb;
+  const std::string prefix =
+      "Installing " + item + " (" + sizeBuf.str() + " MB) -> " + path + " ";
+  constexpr int maxDots = 3;
+
+  for (int i = 0; i <= maxDots; ++i) {
     if (escPressed()) return false;
-    std::cout << "." << std::flush;
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    std::cout << "\r" << prefix << std::string(static_cast<size_t>(i), '.')
+              << std::string(static_cast<size_t>(maxDots - i + 1), ' ')
+              << std::flush;
+    std::this_thread::sleep_for(std::chrono::milliseconds(140));
   }
-  std::cout << " done\n";
+  std::cout << "\r" << prefix << "..." << "   \n";
   return true;
 }
 
@@ -368,8 +372,8 @@ bool runFakeInstaller(std::mt19937 &rng, const std::string &user) {
   }
 
   std::vector<std::string> realPaths = collectRealPaths(user);
-  const std::vector<int> actions = {0, 0, 1, 1, 1, 2, 2, 2,
-                                    3};  // more installs, fewer noise
+  const std::vector<int> actions = {0, 0, 0, 1, 1, 1, 2,
+                                    3};  // bias toward main progress bar
   std::uniform_int_distribution<int> actionDist(
       0, static_cast<int>(actions.size()) - 1);
   std::uniform_int_distribution<int> depsChance(0, 99);
